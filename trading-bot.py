@@ -92,6 +92,10 @@ def place_order(coin, side, qty, price=None):
                  "MSG-SIGNATURE": generate_signature(payload)}
     )
     print(r.status_code, r.text)
+    try:
+        return r.json()
+    except:
+        return None
 
 
 def cancel_order():
@@ -170,6 +174,25 @@ class Donchian_Breakout:
         return picks
 
 # --- Minimal live Donchian trading loop using hourly highs/lows ---
+LOG_FILE = "trade_log.csv"
+
+def _ensure_log():
+    try:
+        import os
+        if not os.path.isfile(LOG_FILE):
+            with open(LOG_FILE, "a", newline="") as f:
+                f.write("timestamp,side,price,qty,dc_high,dc_low,position_before,position_after,status,message\n")
+    except Exception as e:
+        print(f"Log init error: {e}")
+
+def _log_trade(side, price, qty, dc_high, dc_low, pos_before, pos_after, status, message):
+    try:
+        with open(LOG_FILE, "a", newline="") as f:
+            ts = datetime.utcnow().isoformat()
+            f.write(f"{ts},{side},{price},{qty},{dc_high},{dc_low},{pos_before},{pos_after},{status},{message}\n")
+    except Exception as e:
+        print(f"Log write error: {e}")
+
 def _last_price(pair):
     t = get_ticker(pair)
     if not t or not t.get("Success"):
@@ -197,10 +220,11 @@ if __name__ == '__main__':
     # Config
     COIN = "BNB"
     PAIR = f"{COIN}/USD"
-    N = 72               # Donchian lookback in hours
-    POLL_SEC = 30        # how often to poll price
-    TRADE_QTY = 0.05     # fixed quantity per trade to keep it simple
+    N = 72
+    POLL_SEC = 30
+    TRADE_QTY = 0.05
 
+    _ensure_log()
     # State for hourly bars
     period_highs = []    # completed-hour highs
     period_lows = []     # completed-hour lows
@@ -242,16 +266,20 @@ if __name__ == '__main__':
                 # Entry: price > dc_high and we are flat
                 if pos == 0 and price > dc_high:
                     print(f"{datetime.now()} BUY signal: price {price:.4f} > dc_high {dc_high:.4f}")
+                    pos_before = pos
                     r = place_order(COIN, "BUY", TRADE_QTY)
                     if r and r.get("Success"):
                         pos = 1
                         print("Entered LONG.")
+                        _log_trade("BUY", price, TRADE_QTY, dc_high, dc_low, pos_before, pos, "SUCCESS", "Breakout entry")
                     else:
                         print("BUY failed, staying FLAT.")
+                        _log_trade("BUY", price, TRADE_QTY, dc_high, dc_low, pos_before, pos, "FAIL", f"{r}")
 
                 # Exit: price < dc_low and we are long
                 elif pos == 1 and price < dc_low:
                     print(f"{datetime.now()} SELL signal: price {price:.4f} < dc_low {dc_low:.4f}")
+                    pos_before = pos
                     bal = get_balance()
                     qty = _free_coin(COIN, bal)
                     if qty > 0:
@@ -259,11 +287,14 @@ if __name__ == '__main__':
                         if r and r.get("Success"):
                             pos = 0
                             print("Exited LONG.")
+                            _log_trade("SELL", price, qty, dc_high, dc_low, pos_before, pos, "SUCCESS", "Breakdown exit")
                         else:
                             print("SELL failed, staying LONG.")
+                            _log_trade("SELL", price, qty, dc_high, dc_low, pos_before, pos, "FAIL", f"{r}")
                     else:
-                        print("No balance to sell; setting FLAT.")
                         pos = 0
+                        print("No balance to sell; setting FLAT.")
+                        _log_trade("SELL", price, 0, dc_high, dc_low, pos_before, pos, "NO_BALANCE", "Forced flat")
 
             time.sleep(POLL_SEC)
         except KeyboardInterrupt:
