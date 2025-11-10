@@ -675,8 +675,9 @@ class MultiStrategyEngine:
 
         sig_df = pd.DataFrame(out, index=index).fillna(0.0)
         return sig_df
-
-# live_data.py
+# =========================
+# LIVE DATA PIPELINE
+# =========================
 
 import ccxt
 import pandas as pd
@@ -686,7 +687,7 @@ import time
 class LiveDataPipeline:
     """
     Fetches live OHLCV via ccxt and builds the same structure
-    your MultiStrategyEngine expects: matrices for open/high/low/close/volume/vwap/clv.
+    MultiStrategyEngine expects: matrices for open/high/low/close/volume/vwap/clv.
     """
 
     def __init__(self,
@@ -699,13 +700,20 @@ class LiveDataPipeline:
         self.limit = limit
         # symbols like ['BTC/USDT','ETH/USDT',...]
         self.symbols = symbols or ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-        # internal cache
-        self.data = {}  # { 'BTC': DataFrame, ... }
+        # internal cache: { 'BTC': DataFrame, ... }
+        self.data = {}
 
     def _fetch_ohlcv_one(self, symbol):
-        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=self.timeframe, limit=self.limit)
+        ohlcv = self.exchange.fetch_ohlcv(
+            symbol,
+            timeframe=self.timeframe,
+            limit=self.limit
+        )
         # ohlcv columns: [timestamp, open, high, low, close, volume]
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df = pd.DataFrame(
+            ohlcv,
+            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        )
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         df.sort_index(inplace=True)
@@ -721,17 +729,15 @@ class LiveDataPipeline:
             base = sym.split('/')[0]
             df = self._fetch_ohlcv_one(sym)
 
-            # Approx VWAP (no per-trade data): price * volume / volume over bar
-            # Here VWAP == close as an approximation, can refine if needed.
+            # Approx VWAP (no per-trade data): using close as proxy.
             df['vwap'] = df['close']
 
-            # Simple CLV proxy in [-1,1]
-            # (close - low)/(high - low) *2 -1 ; handle div0
+            # CLV proxy in [-1,1]: (close - low)/(high - low)*2 - 1
             span = (df['high'] - df['low']).replace(0, np.nan)
-            clv = ((df['close'] - df['low']) / span) * 2 - 1
+            clv = ((df['close'] - df['low']) / span) * 2.0 - 1.0
             df['clv'] = clv.fillna(0.0)
 
-            new_data[base] = df[['open','high','low','close','volume','vwap','clv']]
+            new_data[base] = df[['open', 'high', 'low', 'close', 'volume', 'vwap', 'clv']]
 
         self.data = new_data
 
@@ -741,7 +747,7 @@ class LiveDataPipeline:
             if col in df.columns:
                 cols.append(df[col].rename(sym))
         if not cols:
-            raise ValueError(f"No column '{col}' found in live data.")
+            raise ValueError("No column '%s' found in live data." % col)
         return pd.concat(cols, axis=1).sort_index()
 
     def get_series_mats(self):
@@ -767,12 +773,13 @@ class LiveDataPipeline:
         }
 
 
-# roostoo_client.py
+# =========================
+# ROOSTOO CLIENT
+# =========================
 
 import requests
 import hashlib
 import hmac
-import time
 import os
 
 BASE_URL = "https://mock-api.roostoo.com"
@@ -789,8 +796,9 @@ class RoostooClient:
         self.quote = quote_currency
 
     def _sign(self, params: dict) -> str:
-        query_string = '&'.join(["{}={}".format(k, params[k])
-                                 for k in sorted(params.keys())])
+        query_string = '&'.join(
+            ["{}={}".format(k, params[k]) for k in sorted(params.keys())]
+        )
         us = self.secret.encode('utf-8')
         m = hmac.new(us, query_string.encode('utf-8'), hashlib.sha256)
         return m.hexdigest()
@@ -798,7 +806,7 @@ class RoostooClient:
     def _auth_headers(self, payload: dict):
         return {
             "RST-API-KEY": self.api_key,
-            "MSG-SIGNATURE": self._sign(payload)
+            "MSG-SIGNATURE": self._sign(payload),
         }
 
     def get_balance(self):
@@ -820,7 +828,7 @@ class RoostooClient:
           - quote_balance: float (e.g. USD)
           - positions: { 'BTC': qty, ... }
 
-        Expected schema (as seen in logs):
+        Expected schema:
         {
           "Success": True,
           "ErrMsg": "",
@@ -834,7 +842,7 @@ class RoostooClient:
         }
         """
         data = self.get_balance()
-        print("Roostoo raw balance:", data)  # keep for visibility
+        print("Roostoo raw balance:", data)
 
         quote_balance = 0.0
         positions = {}
@@ -845,8 +853,7 @@ class RoostooClient:
         spot = data.get("SpotWallet", {}) or {}
 
         for asset, vals in spot.items():
-            # vals like {"Free": 0.446, "Lock": 0}
-            free = vals.get("Free", 0) or 0
+            free = vals.get("Free", 0) or 0.0
             try:
                 free = float(free)
             except (TypeError, ValueError):
@@ -857,7 +864,6 @@ class RoostooClient:
 
             asset_up = asset.upper()
             if asset_up == self.quote.upper():
-                # e.g. USD
                 quote_balance += free
             else:
                 positions[asset_up] = positions.get(asset_up, 0.0) + free
@@ -882,7 +888,6 @@ class RoostooClient:
             headers=self._auth_headers(payload),
             timeout=5,
         )
-        # You may want to handle errors/logging here.
         try:
             r.raise_for_status()
         except Exception as e:
@@ -891,20 +896,24 @@ class RoostooClient:
             print("Order placed:", payload, r.text)
 
 
-# executor.py
+# =========================
+# EXECUTOR
+# =========================
 
-import time
 import numpy as np
 import pandas as pd
+from typing import Optional
 
-# ^ replace `your_multistrat_module` with the actual module where StrategyConfig & MultiStrategyEngine live
-# and import your strategy classes from wherever you defined them.
+# Assumes:
+# - StrategyConfig
+# - MultiStrategyEngine
+# - All strategy classes
+# are already defined above in the same file.
 
 ########################
 # 1. Strategy Weights  #
 ########################
 
-# Use the alpha-based weights you derived earlier (no zeros).
 strategies_config = [
     StrategyConfig(CLV(),                      ['clv'],            weight=0.094325, long_only=True),
     StrategyConfig(FourierTransform(),         ['vwap'],           weight=0.057814, long_only=True),
@@ -913,11 +922,11 @@ strategies_config = [
     StrategyConfig(Cross_Sectional_Momentum(), None,               weight=0.187230, long_only=True),
 
     StrategyConfig(MovingAverageStrategy(),    ['vwap'],           weight=0.01,     long_only=True),
-    StrategyConfig(BreakoutStrategy(),         ['low','high'],     weight=0.01,     long_only=False),
-    StrategyConfig(BetaRegressionStrategy(),   ['low','high'],     weight=0.01,     long_only=True),
+    StrategyConfig(BreakoutStrategy(),         ['low', 'high'],    weight=0.01,     long_only=False),
+    StrategyConfig(BetaRegressionStrategy(),   ['low', 'high'],    weight=0.01,     long_only=True),
     StrategyConfig(AutoRegressiveStrategy(),   ['close'],          weight=0.01,     long_only=True),
     StrategyConfig(ARMAStrategy(),             ['close'],          weight=0.01,     long_only=True),
-    StrategyConfig(VWAPStrategy(),             ['close','volume'], weight=0.01,     long_only=True),
+    StrategyConfig(VWAPStrategy(),             ['close', 'volume'],weight=0.01,     long_only=True),
 ]
 
 engine = MultiStrategyEngine(strategies_config, combine='weighted_sum')
@@ -926,8 +935,7 @@ engine = MultiStrategyEngine(strategies_config, combine='weighted_sum')
 # 2. Live Config       #
 ########################
 
-# Symbols must match ccxt & your internal naming (base symbol = left side).
-SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']  # extend as desired
+SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 
 pipeline = LiveDataPipeline(
     exchange_id='binance',
@@ -936,43 +944,48 @@ pipeline = LiveDataPipeline(
     limit=1500
 )
 
+# Roostoo client will be re-instantiated with keys below
 roostoo = RoostooClient()
 
-LAMBDA = 0.8          # exponential weight memory
-THRESHOLD = 0.02      # turnover trigger (L1 diff in weights)
-MIN_NOTIONAL = 10.0   # minimal USD per trade to avoid dust
+LAMBDA = 0.8          # EW memory for target weights
+THRESHOLD = 0.02      # L1 diff threshold to trigger rebalance
+MIN_NOTIONAL = 10.0   # Minimum USD value per trade
 
 
 ########################
 # 3. Helpers           #
 ########################
 
-_prev_target_weights = None  # across loop iterations
+_prev_target_weights = None  # persistent between iterations
 
 def compute_target_weights(series_mats: dict) -> pd.Series:
     """
     Use MultiStrategyEngine to get ensemble signal for latest bar,
-    then map to long-only normalized weights.
+    then convert to normalized long-only weights.
     """
     index = series_mats['close'].index
     sig_mat = engine.signal_matrix(index, series_mats)
-
-    # last row = latest ensemble scores for each asset
     raw = sig_mat.iloc[-1].clip(lower=0.0)
 
     if raw.sum() == 0:
-        # no conviction -> stay as we are (handled at caller)
         return pd.Series(0.0, index=raw.index)
 
     return raw / raw.sum()
 
 
-def smooth_weights(new_w: pd.Series, prev_w: pd.Series | None) -> pd.Series:
+def smooth_weights(new_w: pd.Series,
+                   prev_w: Optional[pd.Series] = None) -> pd.Series:
+    """
+    Exponential smoothing between previous and new target weights.
+    Uses LAMBDA as smoothing factor.
+    """
     if prev_w is None:
         return new_w
-    blended = LAMBDA * new_w + (1 - LAMBDA) * prev_w
-    s = blended.clip(lower=0.0).sum()
-    if s == 0:
+
+    blended = LAMBDA * new_w + (1.0 - LAMBDA) * prev_w
+    blended = blended.clip(lower=0.0)
+    s = float(blended.sum())
+    if s == 0.0:
         return prev_w
     return blended / s
 
@@ -982,26 +995,30 @@ def should_rebalance(target: pd.Series, current: pd.Series) -> bool:
     return l1 >= THRESHOLD
 
 
-def get_current_weights_from_balance(quote_balance, positions, prices) -> pd.Series:
+def get_current_weights_from_balance(quote_balance,
+                                     positions,
+                                     prices) -> pd.Series:
     """
-    Compute current portfolio weights from Roostoo balances.
-    positions: { 'BTC': qty, ...}
-    prices: { 'BTC': last_price, ...}
+    Compute current portfolio weights from Roostoo balances,
+    restricted to actively traded bases in `prices`.
     """
     assets = sorted(prices.keys())
     values = {}
-    total = quote_balance
+    total = float(quote_balance)
+
     for base in assets:
-        if base in prices:  # only BTC/ETH/SOL
-            qty = positions.get(base, 0.0)
-            val = qty * prices[base]
-            values[base] = val
-            total += val
+        qty = float(positions.get(base, 0.0))
+        val = qty * float(prices[base])
+        values[base] = val
+        total += val
 
     if total <= 0:
         return pd.Series(0.0, index=assets)
 
-    return pd.Series({a: values[a] / total for a in assets}, index=assets)
+    return pd.Series(
+        {a: (values[a] / total) for a in assets},
+        index=assets
+    )
 
 
 def fetch_last_prices(series_mats: dict) -> dict:
@@ -1019,57 +1036,66 @@ def run_realtime_loop(sleep_seconds=300):
 
     while True:
         try:
-            # 1) Update data
+            # 1) Update live data
             pipeline.update()
             series_mats = pipeline.get_series_mats()
             prices = fetch_last_prices(series_mats)
             bases = sorted(prices.keys())
 
-            # 2) Compute target weights from signals
+            # 2) Compute target weights
             target_base = compute_target_weights(series_mats)
 
-            # 3) Smooth vs previous targets
+            # 3) Smooth targets
             target_smoothed = smooth_weights(target_base, _prev_target_weights)
             if _prev_target_weights is None:
                 _prev_target_weights = target_smoothed
 
-            # 4) Get current Roostoo portfolio
+            # 4) Get current portfolio from Roostoo
             quote_balance, positions = roostoo.get_quote_balance_and_positions()
-            current_w = get_current_weights_from_balance(quote_balance, positions, prices)
+            current_w = get_current_weights_from_balance(
+                quote_balance,
+                positions,
+                prices
+            )
 
-            # 5) Decide if we rebalance
+            # Debug info
             print("Target weights:", target_smoothed.to_dict())
             print("Current weights:", current_w.to_dict())
             print("Quote balance:", quote_balance, "Positions:", positions)
-            if not should_rebalance(target_smoothed.reindex(current_w.index).fillna(0.0),
-                                    current_w.reindex(target_smoothed.index).fillna(0.0)):
+
+            # 5) Rebalance decision
+            if not should_rebalance(
+                target_smoothed.reindex(current_w.index).fillna(0.0),
+                current_w.reindex(target_smoothed.index).fillna(0.0)
+            ):
                 print("No rebalance needed.")
                 time.sleep(sleep_seconds)
                 continue
 
-            # 6) Compute target USD allocation & order sizes
-            total_equity = quote_balance + sum(
-                positions.get(b, 0.0) * prices[b] for b in bases
+            # 6) Compute target allocations and place orders
+            total_equity = float(quote_balance) + sum(
+                float(positions.get(b, 0.0)) * float(prices[b])
+                for b in bases
             )
+
             if total_equity <= 0:
                 print("No equity; skipping.")
                 time.sleep(sleep_seconds)
                 continue
 
-            # ensure alignment
             target_smoothed = target_smoothed.reindex(bases).fillna(0.0)
             current_w = current_w.reindex(bases).fillna(0.0)
 
             for base in bases:
                 tgt_val = float(target_smoothed[base]) * total_equity
                 cur_qty = float(positions.get(base, 0.0))
-                cur_val = cur_qty * prices[base]
+                cur_val = cur_qty * float(prices[base])
                 diff_val = tgt_val - cur_val
 
                 if abs(diff_val) < MIN_NOTIONAL:
                     continue
 
-                qty = abs(diff_val) / prices[base]
+                qty = abs(diff_val) / float(prices[base])
                 side = "BUY" if diff_val > 0 else "SELL"
 
                 roostoo.place_market_order(base, side, qty)
@@ -1081,36 +1107,31 @@ def run_realtime_loop(sleep_seconds=300):
 
         time.sleep(sleep_seconds)
 
-# ====== CONFIGURE ROOSTOO + START LIVE EXECUTOR ======
 
-# 1) Set your Roostoo API credentials here
-#    (or set ROOSTOO_API_KEY / ROOSTOO_SECRET as env vars and leave these as None)
+# =========================
+# START EXECUTOR
+# =========================
 
-ROOSTOO_API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"   # <-- replace if needed
-ROOSTOO_SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"   # <-- replace if needed
+ROOSTOO_API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"  # replace in real env
+ROOSTOO_SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"  # replace in real env
 
-# Override the earlier generic client (if any) with an explicitly keyed one
 roostoo = RoostooClient(
     api_key=ROOSTOO_API_KEY or os.getenv("ROOSTOO_API_KEY"),
     secret=ROOSTOO_SECRET or os.getenv("ROOSTOO_SECRET"),
 )
 
 if __name__ == "__main__":
-    # ========= LIVE / DRY-RUN SWITCH =========
-    DRY_RUN = False  # <<-- SET TO False TO SEND REAL ORDERS
+    DRY_RUN = False  # set True to simulate only
 
     if DRY_RUN:
-        # Monkey-patch to log instead of sending
-        _real_place_order = roostoo.place_market_order
+        real_place_order = roostoo.place_market_order
 
         def _mock_place_market_order(base_symbol, side, qty):
-            print(f"[DRY RUN] {side} {qty:.6f} {base_symbol}")
+            print("[DRY RUN]", side, f"{qty:.6f}", base_symbol)
 
         roostoo.place_market_order = _mock_place_market_order
         print("Starting Multi-Strategy live executor in DRY RUN mode...")
     else:
         print("Starting Multi-Strategy live executor in LIVE mode (REAL ORDERS will be sent)...")
 
-    # Align loop sleep with your timeframe (5m candles)
     run_realtime_loop(sleep_seconds=300)
-
