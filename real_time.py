@@ -7,6 +7,8 @@ import talib
 import matplotlib.pyplot as plt
 import warnings
 import quantstats as qs
+import datetime
+from datetime import datetime
 
 import statsmodels.api as sm
 from sklearn.linear_model import LinearRegression
@@ -684,22 +686,25 @@ import pandas as pd
 import numpy as np
 import time
 
-class LiveDataPipeline:
-    """
-    Fetches live OHLCV via ccxt and builds the same structure
-    MultiStrategyEngine expects: matrices for open/high/low/close/volume/vwap/clv.
-    """
+LOG_FILE = "trade_log.csv"
+if not os.path.isfile(LOG_FILE):
+    with open(LOG_FILE, "w") as f:
+        f.write("timestamp,coin,side,qty,price\n")
 
+def append_trade(coin, side, qty, price):
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{datetime.utcnow().isoformat()},{coin},{side},{qty},{price}\n")
+
+class LiveDataPipeline:
     def __init__(self,
-                 exchange_id='binance',
+                 exchange_id='coinbase',
                  symbols=None,
                  timeframe='5m',
                  limit=1000):
         self.exchange = getattr(ccxt, exchange_id)({'enableRateLimit': True})
         self.timeframe = timeframe
         self.limit = limit
-        # symbols like ['BTC/USDT','ETH/USDT',...]
-        self.symbols = symbols or ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+        self.symbols = symbols or ['BTC/USD', 'ETH/USD', 'SOL/USD']
         # internal cache: { 'BTC': DataFrame, ... }
         self.data = {}
 
@@ -870,10 +875,9 @@ class RoostooClient:
 
         return quote_balance, positions
 
-    def place_market_order(self, base_symbol: str, side: str, qty: float):
+    def place_market_order(self, base_symbol: str, side: str, qty: float, price: float = None):
         if qty <= 0:
             return
-
         payload = {
             "timestamp": int(time.time()) * 1000,
             "pair": f"{base_symbol}/{self.quote}",
@@ -881,19 +885,15 @@ class RoostooClient:
             "quantity": float(qty),
             "type": "MARKET",
         }
-
         r = requests.post(
             self.base_url + "/v3/place_order",
             data=payload,
             headers=self._auth_headers(payload),
             timeout=5,
         )
-        try:
-            r.raise_for_status()
-        except Exception as e:
-            print("Order error:", e, r.text)
-        else:
-            print("Order placed:", payload, r.text)
+        r.raise_for_status()
+        append_trade(base_symbol, side.upper(), qty, price if price is not None else 0.0)
+        print("Order placed:", payload, r.text)
 
 
 # =========================
@@ -935,10 +935,10 @@ engine = MultiStrategyEngine(strategies_config, combine='weighted_sum')
 # 2. Live Config       #
 ########################
 
-SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+SYMBOLS = ['BTC/USD', 'ETH/USD', 'SOL/USD']
 
 pipeline = LiveDataPipeline(
-    exchange_id='binance',
+    exchange_id='coinbase',
     symbols=SYMBOLS,
     timeframe='5m',
     limit=1500
@@ -1033,78 +1033,52 @@ def fetch_last_prices(series_mats: dict) -> dict:
 
 def run_realtime_loop(sleep_seconds=300):
     global _prev_target_weights
-
     while True:
-        try:
-            # 1) Update live data
-            pipeline.update()
-            series_mats = pipeline.get_series_mats()
-            prices = fetch_last_prices(series_mats)
-            bases = sorted(prices.keys())
-
-            # 2) Compute target weights
-            target_base = compute_target_weights(series_mats)
-
-            # 3) Smooth targets
-            target_smoothed = smooth_weights(target_base, _prev_target_weights)
-            if _prev_target_weights is None:
-                _prev_target_weights = target_smoothed
-
-            # 4) Get current portfolio from Roostoo
-            quote_balance, positions = roostoo.get_quote_balance_and_positions()
-            current_w = get_current_weights_from_balance(
-                quote_balance,
-                positions,
-                prices
-            )
-
-            # Debug info
-            print("Target weights:", target_smoothed.to_dict())
-            print("Current weights:", current_w.to_dict())
-            print("Quote balance:", quote_balance, "Positions:", positions)
-
-            # 5) Rebalance decision
-            if not should_rebalance(
-                target_smoothed.reindex(current_w.index).fillna(0.0),
-                current_w.reindex(target_smoothed.index).fillna(0.0)
-            ):
-                print("No rebalance needed.")
-                time.sleep(sleep_seconds)
-                continue
-
-            # 6) Compute target allocations and place orders
-            total_equity = float(quote_balance) + sum(
-                float(positions.get(b, 0.0)) * float(prices[b])
-                for b in bases
-            )
-
-            if total_equity <= 0:
-                print("No equity; skipping.")
-                time.sleep(sleep_seconds)
-                continue
-
-            target_smoothed = target_smoothed.reindex(bases).fillna(0.0)
-            current_w = current_w.reindex(bases).fillna(0.0)
-
-            for base in bases:
-                tgt_val = float(target_smoothed[base]) * total_equity
-                cur_qty = float(positions.get(base, 0.0))
-                cur_val = cur_qty * float(prices[base])
-                diff_val = tgt_val - cur_val
-
-                if abs(diff_val) < MIN_NOTIONAL:
-                    continue
-
-                qty = abs(diff_val) / float(prices[base])
-                side = "BUY" if diff_val > 0 else "SELL"
-
-                roostoo.place_market_order(base, side, qty)
-
+        pipeline.update()
+        series_mats = pipeline.get_series_mats()
+        prices = fetch_last_prices(series_mats)
+        bases = sorted(prices.keys())
+        target_base = compute_target_weights(series_mats)
+        target_smoothed = smooth_weights(target_base, _prev_target_weights)
+        if _prev_target_weights is None:
             _prev_target_weights = target_smoothed
-
-        except Exception as e:
-            print("Error in realtime loop:", e)
-
+        quote_balance, positions = roostoo.get_quote_balance_and_positions()
+        current_w = get_current_weights_from_balance(
+            quote_balance,
+            positions,
+            prices
+        )
+        print("Target weights:", target_smoothed.to_dict())
+        print("Current weights:", current_w.to_dict())
+        print("Quote balance:", quote_balance, "Positions:", positions)
+        if not should_rebalance(
+            target_smoothed.reindex(current_w.index).fillna(0.0),
+            current_w.reindex(target_smoothed.index).fillna(0.0)
+        ):
+            print("No rebalance needed.")
+            time.sleep(sleep_seconds)
+            continue
+        total_equity = float(quote_balance) + sum(
+            float(positions.get(b, 0.0)) * float(prices[b])
+            for b in bases
+        )
+        if total_equity <= 0:
+            print("No equity; skipping.")
+            time.sleep(sleep_seconds)
+            continue
+        target_smoothed = target_smoothed.reindex(bases).fillna(0.0)
+        current_w = current_w.reindex(bases).fillna(0.0)
+        for base in bases:
+            tgt_val = float(target_smoothed[base]) * total_equity
+            cur_qty = float(positions.get(base, 0.0))
+            cur_val = cur_qty * float(prices[base])
+            diff_val = tgt_val - cur_val
+            if abs(diff_val) < MIN_NOTIONAL:
+                continue
+            qty = abs(diff_val) / float(prices[base])
+            side = "BUY" if diff_val > 0 else "SELL"
+            roostoo.place_market_order(base, side, qty, float(prices[base]))
+        _prev_target_weights = target_smoothed
         time.sleep(sleep_seconds)
 
 
@@ -1121,17 +1095,13 @@ roostoo = RoostooClient(
 )
 
 if __name__ == "__main__":
-    DRY_RUN = False  # set True to simulate only
-
+    DRY_RUN = False
     if DRY_RUN:
         real_place_order = roostoo.place_market_order
-
-        def _mock_place_market_order(base_symbol, side, qty):
-            print("[DRY RUN]", side, f"{qty:.6f}", base_symbol)
-
+        def _mock_place_market_order(base_symbol, side, qty, price=None):
+            print("[DRY RUN]", side, f"{qty:.6f}", base_symbol, "@", price)
         roostoo.place_market_order = _mock_place_market_order
         print("Starting Multi-Strategy live executor in DRY RUN mode...")
     else:
         print("Starting Multi-Strategy live executor in LIVE mode (REAL ORDERS will be sent)...")
-
     run_realtime_loop(sleep_seconds=300)
