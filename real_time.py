@@ -934,8 +934,14 @@ engine = MultiStrategyEngine(strategies_config, combine='weighted_sum')
 ########################
 # 2. Live Config       #
 ########################
+UNIVERSE_BASES = [
+    "ZEN","AAVE","ADA","APT","ARB","AVAX","BNB","BTC","CAKE","DOGE","DOT","EIGEN","ENA",
+    "ETH","FET","FIL","ICP","LINK","LTC","NEAR","OMNI","ONDO","PENDLE","PENGU","POL",
+    "SEI","SOL","SUI","TAO","UNI","WIF","WLD","XLM","XRP","ZEC"
+]
 
-SYMBOLS = ['BTC/USD', 'ETH/USD', 'SOL/USD']
+# Symbols for ccxt (Coinbase or other USD-quoted exchange)
+SYMBOLS = [f"{base}/USD" for base in UNIVERSE_BASES]
 
 pipeline = LiveDataPipeline(
     exchange_id='coinbase',
