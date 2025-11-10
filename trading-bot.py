@@ -178,9 +178,9 @@ class Donchian_Breakout:
 #39 coins total is correct
 """COINS"""  
 # Step 1: coin universe (exclude 1000CHEEMSUSDT)
-COINS = ["ZEN","AAVE","ADA","APT","ARB","AVAX","BNB","BTC","CAKE","CFX","DOGE","DOT","EIGEN","ENA",
-         "ETH","FET","FIL","ICP","LINK","LISTA","LTC","NEAR","OMNI","ONDO","PENDLE","PENGU","POL",
-         "SEI","SOL","SUI","TAO","TON","TRX","UNI","WIF","WLD","XLM","XRP","ZEC"]
+COINS = ["ZEN","AAVE","ADA","APT","ARB","AVAX","BNB","BTC","CAKE","DOGE","DOT","EIGEN","ENA",
+         "ETH","FET","FIL","ICP","LINK","LTC","NEAR","OMNI","ONDO","PENDLE","PENGU","POL",
+         "SEI","SOL","SUI","TAO","UNI","WIF","WLD","XLM","XRP","ZEC"]
 
 # Step 2: ccxt exchange
 EX = ccxt.coinbase({"enableRateLimit": True})
