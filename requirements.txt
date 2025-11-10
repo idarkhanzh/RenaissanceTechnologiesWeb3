@@ -1,0 +1,11 @@
+numpy
+pandas
+matplotlib
+ta-lib
+quantstats
+statsmodels
+scikit-learn
+scikit-optimize
+scipy
+ccxt
+requests
