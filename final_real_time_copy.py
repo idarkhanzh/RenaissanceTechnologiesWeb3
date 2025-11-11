@@ -9,6 +9,7 @@ import warnings
 import quantstats as qs
 import datetime
 from datetime import datetime
+import math
 
 import statsmodels.api as sm
 from sklearn.linear_model import LinearRegression
@@ -20,21 +21,170 @@ from scipy.special import comb
 from sklearn.model_selection import TimeSeriesSplit
 from dataclasses import dataclass
 from typing import List, Dict
+from pathlib import Path
+from importlib import util
 
 warnings.simplefilter('ignore')
 
 
+###ROOSTOO FUNCTOIONS DO NOT MODIFY###
+
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import requests
+import hashlib
+import hmac
+import time
+
+
+API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"
+SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"
+
+BASE_URL = "https://mock-api.roostoo.com"
+
+
+def generate_signature(params):
+    query_string = '&'.join(["{}={}".format(k, params[k])
+                             for k in sorted(params.keys())])
+    us = SECRET.encode('utf-8')
+    m = hmac.new(us, query_string.encode('utf-8'), hashlib.sha256)
+    return m.hexdigest()
+
+
+def get_server_time():
+    r = requests.get(
+        BASE_URL + "/v3/serverTime",
+    )
+    print(r.status_code, r.text)
+    return r.json()
+
+
+def get_ex_info():
+    r = requests.get(
+        BASE_URL + "/v3/exchangeInfo",
+    )
+    print(r.status_code, r.text)
+    return r.json()
+
+
+def get_ticker(pair=None):
+    payload = {
+        "timestamp": int(time.time()),
+    }
+    if pair:
+        payload["pair"] = pair
+
+    r = requests.get(
+        BASE_URL + "/v3/ticker",
+        params=payload,
+    )
+    print(r.status_code, r.text)
+    return r.json()
+
+
+def get_balance():
+    payload = {
+        "timestamp": int(time.time()) * 1000,
+    }
+
+    r = requests.get(
+        BASE_URL + "/v3/balance",
+        params=payload,
+        headers={"RST-API-KEY": API_KEY,
+                 "MSG-SIGNATURE": generate_signature(payload)}
+    )
+    print(r.status_code, r.text)
+    return r.json()
+
+
+def place_order(coin, side, qty, price=None):
+    payload = {
+        "timestamp": int(time.time()) * 1000,
+        "pair": coin + "/USD",
+        "side": side,
+        "quantity": qty,
+    }
+
+    if not price:
+        payload['type'] = "MARKET"
+    else:
+        payload['type'] = "LIMIT"
+        payload['price'] = price
+
+    r = requests.post(
+        BASE_URL + "/v3/place_order",
+        data=payload,
+        headers={"RST-API-KEY": API_KEY,
+                 "MSG-SIGNATURE": generate_signature(payload)}
+    )
+    print(r.status_code, r.text)
+
+
+def cancel_order():
+    payload = {
+        "timestamp": int(time.time()) * 1000,
+        # "order_id": 77,
+        "pair": "BTC/USD",
+    }
+
+    r = requests.post(
+        BASE_URL + "/v3/cancel_order",
+        data=payload,
+        headers={"RST-API-KEY": API_KEY,
+                 "MSG-SIGNATURE": generate_signature(payload)}
+    )
+    print(r.status_code, r.text)
+
+
+def query_order():
+    payload = {
+        "timestamp": int(time.time())*1000,
+        # "order_id": 77,
+        # "pair": "DASH/USD",
+        # "pending_only": True,
+    }
+
+    r = requests.post(
+        BASE_URL + "/v3/query_order",
+        data=payload,
+        headers={"RST-API-KEY": API_KEY,
+                 "MSG-SIGNATURE": generate_signature(payload)}
+    )
+    print(r.status_code, r.text)
+
+
+def pending_count():
+    payload = {
+        "timestamp": int(time.time()) * 1000,
+    }
+
+    r = requests.get(
+        BASE_URL + "/v3/pending_count",
+        params=payload,
+        headers={"RST-API-KEY": API_KEY,
+                 "MSG-SIGNATURE": generate_signature(payload)}
+    )
+    print(r.status_code, r.text)
+    return r.json()
+
+##################################################################### DO NOT MODIFY ABOVE THIS LINE ###
+
+
 # ----- ALL STRATS ----- #
 
-short_period = 6
-long_period = 12
+short_period = 7
+long_period = 14
 
 class MovingAverageStrategy:
-    def __init__(self, short=short_period, long=long_period):
+    def __init__(self, short=short_period, long=long_period, resample='D'):
         self.short = short
         self.long = long
+        self.resample = resample
     def signal(self, index, series):
-        x = series.values.astype(float)
+        series_daily = series.resample(self.resample).last()
+        index_daily = series_daily.index
+        x = series_daily.values.astype(float)
         methods = ['EMA','SMA','WMA','DEMA','TEMA','TRIMA','KAMA']
         vals = []
         for m in methods:
@@ -59,44 +209,43 @@ class MovingAverageStrategy:
             elif m == 'KAMA':
                 a = talib.KAMA(x, timeperiod=self.short)
                 b = talib.KAMA(x, timeperiod=self.long)
-            sig = (a - b) > 0
-            vals.append(sig.astype(int))
+            vals.append(((a - b) > 0).astype(int))
         avg = np.nanmean(np.column_stack(vals), axis=1)
-        return pd.DataFrame({'value': avg}, index=index)
+        df_daily = pd.DataFrame({'value': avg}, index=index_daily)
+        return df_daily.reindex(index).ffill().fillna(0.0)
 
 
-lookback_period = 12
-zscore_lookback_period = 72
-signal_threshold = 0.75
-
+lookback_period = 6
+zscore_lookback_period = 24
+signal_threshold = 0.6
 
 class BetaRegressionStrategy:
-    def __init__(self, beta_lookback_period=lookback_period, zscore_lookback_period=zscore_lookback_period,
-                 signal_threshold=signal_threshold):
+    def __init__(self, beta_lookback_period=lookback_period,
+                 zscore_lookback_period=zscore_lookback_period,
+                 signal_threshold=signal_threshold,
+                 resample='H'):
         self.beta_lookback_period = beta_lookback_period
         self.zscore_lookback_period = zscore_lookback_period
         self.signal_threshold = signal_threshold
+        self.resample = resample
 
     def signal(self, index, low_series, high_series):
-        x = pd.Series(low_series.values.astype(float), index=index)
-        y = pd.Series(high_series.values.astype(float), index=index)
+        x = low_series.resample(self.resample).min()
+        y = high_series.resample(self.resample).max()
+        idx = x.index
         w = self.beta_lookback_period
-        mx = x.rolling(w).mean()
-        my = y.rolling(w).mean()
-        mxx = (x * x).rolling(w).mean()
-        myy = (y * y).rolling(w).mean()
+        mx = x.rolling(w).mean(); my = y.rolling(w).mean()
+        mxx = (x * x).rolling(w).mean(); myy = (y * y).rolling(w).mean()
         mxy = (x * y).rolling(w).mean()
-        varx = mxx - mx * mx
-        vary = myy - my * my
-        cov = mxy - mx * my
+        varx = mxx - mx * mx; vary = myy - my * my; cov = mxy - mx * my
         beta_s = cov / varx
         corr = cov / (np.sqrt(varx) * np.sqrt(vary))
         r2_s = corr * corr
-        z = (beta_s - beta_s.rolling(self.zscore_lookback_period).mean()) / beta_s.rolling(
-            self.zscore_lookback_period).std()
+        z = (beta_s - beta_s.rolling(self.zscore_lookback_period).mean()) / beta_s.rolling(self.zscore_lookback_period).std()
         strength = z * r2_s
         weight = strength.where(beta_s > self.signal_threshold, 0.0)
-        return pd.DataFrame({'value': weight}, index=index)
+        df_hourly = pd.DataFrame({'value': weight}, index=idx)
+        return df_hourly.reindex(index).ffill().fillna(0.0)
 
 
 threshold = -1
@@ -111,22 +260,24 @@ class CLV:
         return pd.DataFrame({'value': y.astype(int)}, index=index)
 
 
-ma_long = 50
-ma_short = 20
-breakout_lookback = 20
-atr_period = 14
+ma_long = 14
+ma_short = 7
+breakout_lookback = 7
 
-class BreakoutStrategy: 
-    def __init__(self, ma_long=ma_long, ma_short=ma_short, breakout_lookback=breakout_lookback, atr_period=atr_period):
+class BreakoutStrategy:
+    def __init__(self, ma_long=ma_long, ma_short=ma_short,
+                 breakout_lookback=breakout_lookback, resample='D'):
         self.ma_long = ma_long
         self.ma_short = ma_short
         self.breakout_lookback = breakout_lookback
-        self.atr_period = atr_period
+        self.resample = resample
 
     def signal(self, index: pd.DatetimeIndex,
                low_series: pd.Series,
                high_series: pd.Series) -> pd.DataFrame:
-        close = (low_series + high_series) / 2.0
+        low = low_series.resample(self.resample).min()
+        high = high_series.resample(self.resample).max()
+        close = (low + high) / 2.0
 
         ma_long = close.rolling(self.ma_long).mean()
         ma_short = close.rolling(self.ma_short).mean()
@@ -139,18 +290,17 @@ class BreakoutStrategy:
         tr2 = (high_n - prev_close).abs()
         tr3 = (low_n - prev_close).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(self.atr_period).mean()
 
         breakout_up = (close > ma_long) & (close > high_n.shift(1))
         breakout_down = (close < ma_short) & (close < low_n.shift(1))
 
-        sig = pd.Series(0.0, index=index)
-        sig.loc[breakout_up] = 1.0
-        sig.loc[breakout_down] = -1.0
+        sig = pd.Series(0.0, index=close.index)
+        sig[breakout_up] = 1.0
+        sig[breakout_down] = -1.0
 
         sig_smooth = sig.rolling(window=self.ma_short, min_periods=1).mean().fillna(0.0)
-
-        return pd.DataFrame({'value': sig_smooth.astype(float)}, index=index)
+        df_daily = pd.DataFrame({'value': sig_smooth.astype(float)}, index=close.index)
+        return df_daily.reindex(index).ffill().fillna(0.0)
 
 
 time_series_datapoints = 288
@@ -297,57 +447,38 @@ class FourierTransform:
                vwap_series: pd.Series) -> pd.DataFrame:
         s = vwap_series.dropna().sort_index()
         s = np.log(s[s > 0])
-
         if len(s) < self.recents:
             return pd.DataFrame({'value': pd.Series(0.0, index=index)})
-
         spec_last = self.discrete_fourier_transform(s, self.recents)
         chosen = self.choose_filter_bound(s, spec_last, self.low_grid, self.high_grid)
         if chosen is None:
             return pd.DataFrame({'value': pd.Series(0.0, index=index)})
-
         low_f, high_f = chosen
         weights = pd.Series(0.0, index=s.index, dtype=float)
-
         step = self.recents
-        inst_reg = max(8, self.recents // 6)
-
+        inst_reg = 3
         for t in range(self.recents, len(s) + 1, step):
             sw = s.iloc[:t].tail(self.recents)
             spec_t = self.discrete_fourier_transform(sw, self.recents)
             el, em, eh = self.compute_energy(spec_t, low_f, high_f)
-
             low_ts = self.reconstruct_time_series(sw, low_f, high_f, "low")
             mid_ts = self.reconstruct_time_series(sw, low_f, high_f, "middle")
-
             sl = self.compute_slope(low_ts, inst_reg)
             sm = self.compute_slope(mid_ts, inst_reg)
-
-            ok = (
-                (el >= self.low_energy_threshold) and
-                (em >= self.mid_energy_threshold) and
-                (sl >= self.low_slope_threshold) and
-                (sm >= self.mid_slope_threshold)
-            )
-
+            ok = ((el >= self.low_energy_threshold) and
+                  (em >= self.mid_energy_threshold) and
+                  (sl >= self.low_slope_threshold) and
+                  (sm >= self.mid_slope_threshold))
             if ok:
-                w = max(
-                    0.0,
-                    1.0 - (eh / el if el > 0 else 1.0) - (eh / em if em > 0 else 1.0)
-                )
+                w = max(0.0, 1.0 - (eh / el if el > 0 else 1.0) - (eh / em if em > 0 else 1.0))
             else:
                 w = 0.0
-
             weights.iloc[t - 1] = float(max(w, 0.0))
-
         weights = weights.replace(0, np.nan).ffill().fillna(0.0)
-
         full = pd.Series(0.0, index=index, dtype=float)
         full.loc[weights.index] = weights.values
         full = full.ffill().fillna(0.0)
-
         return pd.DataFrame({'value': full}, index=index)
-
 
 
 # AR Parameter
@@ -412,7 +543,7 @@ class ARMAStrategy:
 
 
 # Mean Reversion Parameter
-window = 252
+window = 288
 z_entry = -1.5
 z_exit = -0.3
 
@@ -699,13 +830,21 @@ class LiveDataPipeline:
     def __init__(self,
                  exchange_id='coinbase',
                  symbols=None,
-                 timeframe='5m',
-                 limit=1000):
-        self.exchange = getattr(ccxt, exchange_id)({'enableRateLimit': True})
+                 timeframe='1m',
+                 limit=500,
+                 exchange_params=None):
+        params = {'enableRateLimit': True}
+        if exchange_params:
+            params.update(exchange_params)
+        self.exchange = getattr(ccxt, exchange_id)(params)
+        self.exchange.load_markets()
         self.timeframe = timeframe
-        self.limit = limit
-        self.symbols = symbols or ['BTC/USD', 'ETH/USD', 'SOL/USD']
-        # internal cache: { 'BTC': DataFrame, ... }
+        self.limit = int(limit)
+        supported = set(self.exchange.symbols or [])
+        requested = symbols or ['BTC/USD', 'ETH/USD', 'SOL/USD']
+        self.symbols = [s for s in requested if s in supported]
+        if not self.symbols:
+            raise RuntimeError("No requested symbols supported by Coinbase.")
         self.data = {}
 
     def _fetch_ohlcv_one(self, symbol):
@@ -779,123 +918,82 @@ class LiveDataPipeline:
 
 
 # =========================
-# ROOSTOO CLIENT
+# ROOSTOO CLIENT (using functions above)
 # =========================
 
-import requests
-import hashlib
-import hmac
-import os
+QUOTE_CURRENCY = "USD"
+BASE_LOT_SIZES = {
+    "BTC": 0.0001, "ETH": 0.001, "ARB": 0.1, "APT": 0.01, "AVAX": 0.01, "ADA": 1.0,
+    "AAVE": 0.001, "BNB": 0.001, "CAKE": 0.1, "DOGE": 1.0, "DOT": 0.1, "EIGEN": 0.1,
+    "ENA": 0.1, "FET": 0.1, "FIL": 0.01, "ICP": 0.01, "LINK": 0.01, "LTC": 0.001,
+    "NEAR": 0.1, "ONDO": 0.1, "PENDLE": 0.01, "PENGU": 1.0, "POL": 0.1, "SEI": 0.1,
+    "SOL": 0.001, "SUI": 0.01, "TAO": 0.0001, "UNI": 0.01, "WIF": 0.01, "WLD": 0.01,
+    "XLM": 1.0, "XRP": 0.1, "ZEC": 0.001, "ZEN": 0.001
+}
 
-BASE_URL = "https://mock-api.roostoo.com"
+_EX_STEP = {}
 
-class RoostooClient:
-    def __init__(self,
-                 api_key=None,
-                 secret=None,
-                 base_url=BASE_URL,
-                 quote_currency="USD"):
-        self.api_key = api_key or os.getenv("ROOSTOO_API_KEY")
-        self.secret = secret or os.getenv("ROOSTOO_SECRET")
-        self.base_url = base_url
-        self.quote = quote_currency
-
-    def _sign(self, params: dict) -> str:
-        query_string = '&'.join(
-            ["{}={}".format(k, params[k]) for k in sorted(params.keys())]
-        )
-        us = self.secret.encode('utf-8')
-        m = hmac.new(us, query_string.encode('utf-8'), hashlib.sha256)
-        return m.hexdigest()
-
-    def _auth_headers(self, payload: dict):
-        return {
-            "RST-API-KEY": self.api_key,
-            "MSG-SIGNATURE": self._sign(payload),
-        }
-
-    def get_balance(self):
-        payload = {
-            "timestamp": int(time.time()) * 1000,
-        }
-        r = requests.get(
-            self.base_url + "/v3/balance",
-            params=payload,
-            headers=self._auth_headers(payload),
-            timeout=5,
-        )
-        r.raise_for_status()
-        return r.json()
-
-    def get_quote_balance_and_positions(self):
-        """
-        Parse Roostoo balance into:
-          - quote_balance: float (e.g. USD)
-          - positions: { 'BTC': qty, ... }
-
-        Expected schema:
-        {
-          "Success": True,
-          "ErrMsg": "",
-          "SpotWallet": {
-             "BTC": {"Free": 0.00094, "Lock": 0},
-             "ETH": {"Free": 0.0278, "Lock": 0},
-             "USD": {"Free": 46141.04, "Lock": 0},
-             ...
-          },
-          "MarginWallet": { ... }
-        }
-        """
-        data = self.get_balance()
-        print("Roostoo raw balance:", data)
-
-        quote_balance = 0.0
-        positions = {}
-
-        if not isinstance(data, dict) or not data.get("Success", False):
-            return 0.0, {}
-
-        spot = data.get("SpotWallet", {}) or {}
-
-        for asset, vals in spot.items():
-            free = vals.get("Free", 0) or 0.0
+def init_step_sizes():
+    info = get_ex_info() or {}
+    instruments = info.get("Instruments") or []
+    for inst in instruments:
+        pair = (inst.get("Pair") or "").upper()
+        base = pair.split("/")[0] if "/" in pair else pair
+        step = (inst.get("QuantityStepSize") or inst.get("StepSize") or inst.get("QtyStep"))
+        if base:
             try:
-                free = float(free)
-            except (TypeError, ValueError):
-                free = 0.0
+                _EX_STEP[base] = float(step)
+            except:
+                _EX_STEP[base] = float(BASE_LOT_SIZES.get(base, 0.01))
 
-            if free <= 0:
-                continue
+def _round_step(base_symbol, qty):
+    if not _EX_STEP:
+        init_step_sizes()
+    step = float(_EX_STEP.get(base_symbol.upper(), BASE_LOT_SIZES.get(base_symbol.upper(), 0.01)))
+    units = int(qty // step)
+    return round(units * step, 8)
 
-            asset_up = asset.upper()
-            if asset_up == self.quote.upper():
-                quote_balance += free
+def real_roostoo_place_market_order(base_symbol, side, qty, price=None):
+    base = base_symbol.upper()
+    side = side.upper()
+    adj = _round_step(base, float(qty))
+    if adj <= 0:
+        return None
+    place_order(base, side, f"{adj:.8f}")
+    return {"OrderDetail": {"FillPrice": price}}
+
+def roostoo_get_quote_balance_and_positions():
+    data = get_balance() or {}
+    quote = 0.0
+    positions = {}
+    # try common shapes from the mock API
+    spot = data.get("SpotWallet") or {}
+    if spot:
+        for asset, vals in spot.items():
+            free = float(vals.get("Free", 0) or 0)
+            asset = asset.upper()
+            if asset == QUOTE_CURRENCY:
+                quote += free
             else:
-                positions[asset_up] = positions.get(asset_up, 0.0) + free
+                positions[asset] = positions.get(asset, 0.0) + free
+        return quote, positions
+    items = data.get("Balances") or data.get("Data") or data.get("data") or []
+    for it in items:
+        asset = (it.get('Asset') or it.get('asset') or it.get('Symbol') or it.get('symbol') or '').upper()
+        free = it.get('Free')
+        if free is None:
+            free = it.get('Available', it.get('available', it.get('Total', it.get('total', 0.0))))
+        amt = float(free or 0.0)
+        if asset == QUOTE_CURRENCY:
+            quote += amt
+        elif asset:
+            positions[asset] = amt
+    return quote, positions
 
-        return quote_balance, positions
+# default live order function alias
+roostoo_place_market_order = real_roostoo_place_market_order
 
-    def place_market_order(self, base_symbol: str, side: str, qty: float, price: float = None):
-        if qty <= 0:
-            return
-        payload = {
-            "timestamp": int(time.time()) * 1000,
-            "pair": f"{base_symbol}/{self.quote}",
-            "side": side.upper(),
-            "quantity": float(qty),
-            "type": "MARKET",
-        }
-        r = requests.post(
-            self.base_url + "/v3/place_order",
-            data=payload,
-            headers=self._auth_headers(payload),
-            timeout=5,
-        )
-        r.raise_for_status()
-        append_trade(base_symbol, side.upper(), qty, price if price is not None else 0.0)
-        print("Order placed:", payload, r.text)
-
-
+# To force never sell: comment SELL branch inside run_realtime_loop or flip long_only for BreakoutStrategy
 # =========================
 # EXECUTOR
 # =========================
@@ -914,19 +1012,32 @@ from typing import Optional
 # 1. Strategy Weights  #
 ########################
 
-strategies_config = [
-    StrategyConfig(CLV(),                      ['clv'],            weight=0.094325, long_only=True),
-    StrategyConfig(FourierTransform(),         ['vwap'],           weight=0.057814, long_only=True),
-    StrategyConfig(MeanReversionStrategy(),    ['close'],          weight=0.178602, long_only=True),
-    StrategyConfig(Donchian_Breakout(),        None,               weight=0.422030, long_only=True),
-    StrategyConfig(Cross_Sectional_Momentum(), None,               weight=0.187230, long_only=True),
+"""OLD WEIGHTS"""
+# strategies_config = [
+#     StrategyConfig(CLV(),                      ['clv'],            weight=0.094325, long_only=True),
+#     StrategyConfig(FourierTransform(),         ['vwap'],           weight=0.057814, long_only=True),
+#     StrategyConfig(MeanReversionStrategy(),    ['close'],          weight=0.178602, long_only=True),
+#     StrategyConfig(Donchian_Breakout(),        None,               weight=0.422030, long_only=True),
+#     StrategyConfig(Cross_Sectional_Momentum(), None,               weight=0.187230, long_only=True),
 
-    StrategyConfig(MovingAverageStrategy(),    ['vwap'],           weight=0.01,     long_only=True),
-    StrategyConfig(BreakoutStrategy(),         ['low', 'high'],    weight=0.01,     long_only=False),
-    StrategyConfig(BetaRegressionStrategy(),   ['low', 'high'],    weight=0.01,     long_only=True),
-    StrategyConfig(AutoRegressiveStrategy(),   ['close'],          weight=0.01,     long_only=True),
-    StrategyConfig(ARMAStrategy(),             ['close'],          weight=0.01,     long_only=True),
-    StrategyConfig(VWAPStrategy(),             ['close', 'volume'],weight=0.01,     long_only=True),
+#     StrategyConfig(MovingAverageStrategy(),    ['vwap'],           weight=0.01,     long_only=True),
+#     StrategyConfig(BreakoutStrategy(),         ['low', 'high'],    weight=0.01,     long_only=False),
+#     StrategyConfig(BetaRegressionStrategy(),   ['low', 'high'],    weight=0.01,     long_only=True),
+#     StrategyConfig(AutoRegressiveStrategy(),   ['close'],          weight=0.01,     long_only=True),
+#     StrategyConfig(ARMAStrategy(),             ['close'],          weight=0.01,     long_only=True),
+#     StrategyConfig(VWAPStrategy(),             ['close', 'volume'],weight=0.01,     long_only=True),
+# ]
+
+strategies_config = [
+    # Positive-alpha dominated
+    StrategyConfig(CLV(),                      ['clv'],            weight=0.81, long_only=True),
+    StrategyConfig(FourierTransform(),         ['vwap'],           weight=0.51, long_only=True),
+    StrategyConfig(MeanReversionStrategy(),    ['close'],          weight=0.84, long_only=True),
+    StrategyConfig(Donchian_Breakout(),        None,               weight=7.16, long_only=True),
+    StrategyConfig(Cross_Sectional_Momentum(), None,               weight=2.1, long_only=True),
+    StrategyConfig(MovingAverageStrategy(),    ['vwap'],           weight=1.58,     long_only=True),
+    StrategyConfig(BreakoutStrategy(),         ['low','high'],     weight=1.07,     long_only=False),
+    StrategyConfig(BetaRegressionStrategy(),   ['low','high'],     weight=2.9,     long_only=True),
 ]
 
 engine = MultiStrategyEngine(strategies_config, combine='weighted_sum')
@@ -943,15 +1054,23 @@ UNIVERSE_BASES = [
 # Symbols for ccxt (Coinbase or other USD-quoted exchange)
 SYMBOLS = [f"{base}/USD" for base in UNIVERSE_BASES]
 
+COINBASE_API_KEY = os.getenv("COINBASE_API_KEY")
+COINBASE_SECRET_KEY = os.getenv("COINBASE_SECRET_KEY")
+COINBASE_PASSWORD = os.getenv("COINBASE_PASSWORD")
+
 pipeline = LiveDataPipeline(
     exchange_id='coinbase',
+    exchange_params={
+        'apiKey': COINBASE_API_KEY,
+        'secret': COINBASE_SECRET_KEY,
+        'password': COINBASE_PASSWORD
+    },
     symbols=SYMBOLS,
-    timeframe='5m',
-    limit=1500
+    timeframe='1m',
+    limit=500
 )
 
-# Roostoo client will be re-instantiated with keys below
-roostoo = RoostooClient()
+
 
 LAMBDA = 0.8          # EW memory for target weights
 THRESHOLD = 0.02      # L1 diff threshold to trigger rebalance
@@ -1006,25 +1125,28 @@ def get_current_weights_from_balance(quote_balance,
                                      prices) -> pd.Series:
     """
     Compute current portfolio weights from Roostoo balances,
-    restricted to actively traded bases in `prices`.
+    restricted to bases we have prices for. Always returns 0 instead of NaN.
     """
     assets = sorted(prices.keys())
+    if not assets:
+        return pd.Series(dtype=float)
+
     values = {}
     total = float(quote_balance)
 
     for base in assets:
         qty = float(positions.get(base, 0.0))
-        val = qty * float(prices[base])
+        px = float(prices.get(base, 0.0))
+        val = qty * px
         values[base] = val
         total += val
 
     if total <= 0:
         return pd.Series(0.0, index=assets)
 
-    return pd.Series(
-        {a: (values[a] / total) for a in assets},
-        index=assets
-    )
+    w = pd.Series({a: values[a] / total for a in assets}, index=assets)
+    return w.fillna(0.0)
+
 
 
 def fetch_last_prices(series_mats: dict) -> dict:
@@ -1037,77 +1159,154 @@ def fetch_last_prices(series_mats: dict) -> dict:
 # 4. Main Loop         #
 ########################
 
-def run_realtime_loop(sleep_seconds=300):
+def run_realtime_loop(sleep_seconds=60): ##CHANGE THIS TO CHANGE REBALANCE FREQUENCY ##
     global _prev_target_weights
+
     while True:
-        pipeline.update()
-        series_mats = pipeline.get_series_mats()
-        prices = fetch_last_prices(series_mats)
-        bases = sorted(prices.keys())
-        target_base = compute_target_weights(series_mats)
-        target_smoothed = smooth_weights(target_base, _prev_target_weights)
-        if _prev_target_weights is None:
-            _prev_target_weights = target_smoothed
-        quote_balance, positions = roostoo.get_quote_balance_and_positions()
-        current_w = get_current_weights_from_balance(
-            quote_balance,
-            positions,
-            prices
-        )
-        print("Target weights:", target_smoothed.to_dict())
-        print("Current weights:", current_w.to_dict())
-        print("Quote balance:", quote_balance, "Positions:", positions)
-        if not should_rebalance(
-            target_smoothed.reindex(current_w.index).fillna(0.0),
-            current_w.reindex(target_smoothed.index).fillna(0.0)
-        ):
-            print("No rebalance needed.")
-            time.sleep(sleep_seconds)
-            continue
-        total_equity = float(quote_balance) + sum(
-            float(positions.get(b, 0.0)) * float(prices[b])
-            for b in bases
-        )
-        if total_equity <= 0:
-            print("No equity; skipping.")
-            time.sleep(sleep_seconds)
-            continue
-        target_smoothed = target_smoothed.reindex(bases).fillna(0.0)
-        current_w = current_w.reindex(bases).fillna(0.0)
-        for base in bases:
-            tgt_val = float(target_smoothed[base]) * total_equity
-            cur_qty = float(positions.get(base, 0.0))
-            cur_val = cur_qty * float(prices[base])
-            diff_val = tgt_val - cur_val
-            if abs(diff_val) < MIN_NOTIONAL:
+        try:
+            # 1) Pull live market data
+            pipeline.update()
+            series_mats = pipeline.get_series_mats()
+            prices = fetch_last_prices(series_mats)  # { 'AAVE': 123.4, ... }
+            bases = sorted(prices.keys())
+
+            if not bases:
+                print("No live prices available, skipping this cycle.")
+                time.sleep(sleep_seconds)
                 continue
-            qty = abs(diff_val) / float(prices[base])
-            side = "BUY" if diff_val > 0 else "SELL"
-            roostoo.place_market_order(base, side, qty, float(prices[base]))
-        _prev_target_weights = target_smoothed
+
+            # 2) Compute target weights from strategies
+            index = series_mats['close'].index
+            raw_target = engine.signal_matrix(index, series_mats).iloc[-1].clip(lower=0.0)
+
+            if raw_target.sum() == 0:
+                print("All strategy signals are zero; skipping rebalance.")
+                time.sleep(sleep_seconds)
+                continue
+
+            target_base = (raw_target / raw_target.sum()).reindex(bases).fillna(0.0)
+
+            # 3) Smooth weights vs previous
+            target_smoothed = smooth_weights(target_base, _prev_target_weights)
+            if _prev_target_weights is None:
+                _prev_target_weights = target_smoothed
+
+            # 4) Get Roostoo portfolio
+            quote_balance, positions = roostoo_get_quote_balance_and_positions()
+
+            # compute current weights ONLY on assets we have prices for (bases)
+            current_w = get_current_weights_from_balance(quote_balance, positions, prices)
+
+            # Debug prints
+            print("Target weights:", target_smoothed.to_dict())
+            print("Current weights:", current_w.to_dict())
+            print("Quote balance:", quote_balance, "Positions:", positions)
+
+            # 5) Rebalance decision
+            tw = target_smoothed.reindex(bases).fillna(0.0)
+            cw = current_w.reindex(bases).fillna(0.0)
+            l1 = (tw - cw).abs().sum()
+            print("L1 diff:", float(l1))
+
+            if l1 < THRESHOLD:
+                print("No rebalance needed.")
+                time.sleep(sleep_seconds)
+                continue
+
+            # 6) Compute total equity using only tradable bases
+            total_equity = float(quote_balance)
+            for base in bases:
+                qty = float(positions.get(base, 0.0))
+                px = float(prices.get(base, 0.0))
+                if qty > 0 and px > 0:
+                    total_equity += qty * px
+
+            if total_equity <= 0:
+                print("No equity; skipping.")
+                time.sleep(sleep_seconds)
+                continue
+
+            # 7) Place orders (LONG ONLY, SAFE)
+            #    - never short
+            #    - never sell more than you own
+            #    - never trade below MIN_NOTIONAL
+            #    - use local quote_balance to not overspend
+            for base in bases:
+                px = float(prices.get(base, 0.0))
+                if not np.isfinite(px) or px <= 0:
+                    continue
+
+                t_w = float(tw.get(base, 0.0))
+                if not np.isfinite(t_w) or t_w < 0:
+                    t_w = 0.0
+
+                cur_qty = float(positions.get(base, 0.0))
+                if not np.isfinite(cur_qty) or cur_qty < 0:
+                    cur_qty = 0.0
+
+                cur_val = cur_qty * px
+                tgt_val = t_w * total_equity
+
+                if not np.isfinite(tgt_val) or not np.isfinite(cur_val):
+                    continue
+
+                diff_val = tgt_val - cur_val
+                if not np.isfinite(diff_val):
+                    continue
+
+                # Tiny adjustment -> skip
+                if abs(diff_val) < MIN_NOTIONAL:
+                    continue
+
+                # allow buy or sell (no shorting)
+                if diff_val > 0:
+                    buy_val = min(diff_val, quote_balance)
+                    if buy_val < MIN_NOTIONAL:
+                        continue
+                    qty = buy_val / px
+                    side = "BUY"
+                    quote_balance -= buy_val
+                else:
+                    desired_sell_val = -diff_val
+                    max_sell_val = cur_val            # don't sell more than we own
+                    sell_val = min(desired_sell_val, max_sell_val)
+                    if sell_val < MIN_NOTIONAL:
+                        continue
+                    qty = sell_val / px
+                    side = "SELL"
+
+                res = roostoo_place_market_order(base, side, qty, px)
+                if res:
+                    fill_price = px
+                    detail = res.get("OrderDetail", {})
+                    if isinstance(detail, dict):
+                        fill_price = float(detail.get("FillPrice") or fill_price)
+                    append_trade(base, side, qty, fill_price)
+                    time.sleep(0.25)
+
+            _prev_target_weights = tw
+
+        except Exception as e:
+            # Do NOT silently die; show the error so you know why no trades happen
+            print("Error in realtime loop:", repr(e))
+
         time.sleep(sleep_seconds)
+
 
 
 # =========================
 # START EXECUTOR
 # =========================
+# (Orders are sent via Roostoo functions defined above)
 
-ROOSTOO_API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"  # replace in real env
-ROOSTOO_SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"  # replace in real env
-
-roostoo = RoostooClient(
-    api_key=ROOSTOO_API_KEY or os.getenv("ROOSTOO_API_KEY"),
-    secret=ROOSTOO_SECRET or os.getenv("ROOSTOO_SECRET"),
-)
-
+DRY_RUN = False
 if __name__ == "__main__":
-    DRY_RUN = False
     if DRY_RUN:
-        real_place_order = roostoo.place_market_order
-        def _mock_place_market_order(base_symbol, side, qty, price=None):
+        def mock_place_market_order(base_symbol, side, qty, price=None):
             print("[DRY RUN]", side, f"{qty:.6f}", base_symbol, "@", price)
-        roostoo.place_market_order = _mock_place_market_order
+            return {"OrderDetail": {"FillPrice": price}}
+        roostoo_place_market_order = mock_place_market_order
         print("Starting Multi-Strategy live executor in DRY RUN mode...")
     else:
-        print("Starting Multi-Strategy live executor in LIVE mode (REAL ORDERS will be sent)...")
-    run_realtime_loop(sleep_seconds=300)
+        print("Starting Multi-Strategy live executor in LIVE mode (REAL ORDERS will be sent via Roostoo)...")
+    run_realtime_loop(sleep_seconds=60) ##CHANGE THIS TO MODIFY REBALANCE
