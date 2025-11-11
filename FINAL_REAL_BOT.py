@@ -37,12 +37,12 @@ import hashlib
 import hmac
 import time
 
-# API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"
-# SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"
+API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"
+SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"
 
 """REAL API"""
-API_KEY = "pR6tM2yNaV9bC4DfH1jK7LxWoG3qS8EeT5uZ0iYcnB2vF6PrX7wD1mQaJ4lUh9Sz"
-SECRET = "C9vB1nM5qW7eRtY3uI9oPaS1dF3gHjK7lL2ZxC6V8bN4mQwE0rT4yUiP6oA8"
+# API_KEY = "pR6tM2yNaV9bC4DfH1jK7LxWoG3qS8EeT5uZ0iYcnB2vF6PrX7wD1mQaJ4lUh9Sz"
+# SECRET = "C9vB1nM5qW7eRtY3uI9oPaS1dF3gHjK7lL2ZxC6V8bN4mQwE0rT4yUiP6oA8"
 
 BASE_URL = "https://mock-api.roostoo.com"
 
@@ -651,10 +651,10 @@ class Donchian_Breakout:
 
 
 
-lookback = 30
+lookback = 14
 top_frac = 0.2
 vol_threshold = 5000000
-vol_window = 15
+vol_window = 7
 risk_shift = 1
 
 class Cross_Sectional_Momentum:
@@ -1035,7 +1035,7 @@ strategies_config = [
     StrategyConfig(FourierTransform(),         ['vwap'],           weight=0.51, long_only=True),
     StrategyConfig(MeanReversionStrategy(),    ['close'],          weight=0.84, long_only=True),
     StrategyConfig(Donchian_Breakout(),        None,               weight=7.16, long_only=True),
-    StrategyConfig(Cross_Sectional_Momentum(), None,               weight=2.1, long_only=True),
+    StrategyConfig(Cross_Sectional_Momentum(), None,               weight=6.83, long_only=True),
     StrategyConfig(MovingAverageStrategy(),    ['vwap'],           weight=1.58, long_only=True),
     StrategyConfig(BreakoutStrategy(),         ['low','high'],     weight=1.07, long_only=False),
     StrategyConfig(BetaRegressionStrategy(),   ['low','high'],     weight=2.9,  long_only=True),
@@ -1089,6 +1089,82 @@ MIN_NOTIONAL = 10.0   # Minimum USD value per trade
 ########################
 
 _prev_target_weights = None  # persistent between iterations
+
+def warm_strategies_with_history(days=1, timeframe='5m'):
+    global _prev_target_weights
+    ex = pipeline.exchange
+    syms = pipeline.symbols
+
+    step_ms = int(ex.parse_timeframe(timeframe) * 1000)
+    need_bars = int(days * 24 * 60 * 60 * 1000 // step_ms)
+
+    new_data = {}
+    last_ts_list = []
+
+    for sym in syms:
+        base = sym.split('/')[0]
+
+        # 1) Start from the latest window
+        ohlcv = ex.fetch_ohlcv(sym, timeframe=timeframe, limit=500)
+        if not ohlcv:
+            continue
+        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        df.set_index('timestamp', inplace=True)
+        df.sort_index(inplace=True)
+
+        # 2) Backfill older chunks until we reach target history
+        while len(df) < need_bars:
+            first_ms = int(df.index[0].timestamp() * 1000)
+            prev_since = first_ms - 500 * step_ms
+            chunk = ex.fetch_ohlcv(sym, timeframe=timeframe, since=prev_since, limit=500)
+            if not chunk:
+                break
+            df2 = pd.DataFrame(chunk, columns=['timestamp','open','high','low','close','volume'])
+            df2['timestamp'] = pd.to_datetime(df2['timestamp'], unit='ms', utc=True)
+            df2.set_index('timestamp', inplace=True)
+            df2.sort_index(inplace=True)
+            df2 = df2[df2.index < df.index[0]]  # keep only strictly older bars
+            if df2.empty:
+                break
+            df = pd.concat([df2, df]).sort_index()
+
+        # 3) Add derived fields
+        df['vwap'] = df['close']
+        span = (df['high'] - df['low']).replace(0, np.nan)
+        df['clv'] = (((df['close'] - df['low']) / span) * 2.0 - 1.0).fillna(0.0)
+
+        # 4) Save and report freshness
+        new_data[base] = df[['open','high','low','close','volume','vwap','clv']]
+        last_ts = df.index[-1]
+        last_ts_list.append(last_ts)
+        now_ut = pd.Timestamp.now('UTC')
+        age_min = (now_ut - last_ts).total_seconds() / 60.0
+        print(f"WARM {base:>6} last={last_ts} age_min={age_min:.1f}")
+
+    if last_ts_list:
+        gmin = min(last_ts_list)
+        gmax = max(last_ts_list)
+        now_ut = pd.Timestamp.now('UTC')
+        print(f"WARM RANGE first={gmin} last={gmax} now={now_ut} lag_last_min={(now_ut-gmax).total_seconds()/60:.1f}")
+        last_5m = now_ut.floor('5T')
+        if gmax >= last_5m:
+            print(f"SUCCESS: OHLCV is updated to the nearest 5 min mark (expected={last_5m}, latest={gmax})")
+        else:
+            lag5 = (last_5m - gmax).total_seconds() / 60.0
+            print(f"ERROR: OHLCV not up to date (expected={last_5m}, latest={gmax}, lag_min={lag5:.1f})")
+
+    if not new_data:
+        return
+
+    old = pipeline.data
+    pipeline.data = new_data
+    series_mats = pipeline.get_series_mats()
+    idx = series_mats['close'].index
+    raw = engine.signal_matrix(idx, series_mats).iloc[-1].clip(lower=0.0)
+    _prev_target_weights = (raw / raw.sum()).fillna(0.0) if raw.sum() > 0 else raw
+    pipeline.data = old
+
 
 def compute_target_weights(series_mats: dict) -> pd.Series:
     """
@@ -1361,4 +1437,9 @@ if __name__ == "__main__":
         print("Starting Multi-Strategy live executor in DRY RUN mode...")
     else:
         print("Starting Multi-Strategy live executor in LIVE mode (REAL ORDERS will be sent via Roostoo)...")
+
+    # Warm strategies with 5m data before live loop
+    warm_strategies_with_history(days=1, timeframe='5m')
+
+
     run_realtime_loop(sleep_seconds=86400)
