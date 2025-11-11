@@ -37,9 +37,12 @@ import hashlib
 import hmac
 import time
 
+# API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"
+# SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"
 
-API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"
-SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"
+"""REAL API"""
+API_KEY = "pR6tM2yNaV9bC4DfH1jK7LxWoG3qS8EeT5uZ0iYcnB2vF6PrX7wD1mQaJ4lUh9Sz"
+SECRET = "C9vB1nM5qW7eRtY3uI9oPaS1dF3gHjK7lL2ZxC6V8bN4mQwE0rT4yUiP6oA8"
 
 BASE_URL = "https://mock-api.roostoo.com"
 
@@ -540,8 +543,6 @@ class ARMAStrategy:
         out = pd.DataFrame({'value': sig}, index=index)
         return out
 
-
-
 # Mean Reversion Parameter
 window = 288
 z_entry = -1.5
@@ -830,7 +831,7 @@ class LiveDataPipeline:
     def __init__(self,
                  exchange_id='coinbase',
                  symbols=None,
-                 timeframe='1m',
+                 timeframe='5m',
                  limit=500,
                  exchange_params=None):
         params = {'enableRateLimit': True}
@@ -1035,10 +1036,16 @@ strategies_config = [
     StrategyConfig(MeanReversionStrategy(),    ['close'],          weight=0.84, long_only=True),
     StrategyConfig(Donchian_Breakout(),        None,               weight=7.16, long_only=True),
     StrategyConfig(Cross_Sectional_Momentum(), None,               weight=2.1, long_only=True),
-    StrategyConfig(MovingAverageStrategy(),    ['vwap'],           weight=1.58,     long_only=True),
-    StrategyConfig(BreakoutStrategy(),         ['low','high'],     weight=1.07,     long_only=False),
-    StrategyConfig(BetaRegressionStrategy(),   ['low','high'],     weight=2.9,     long_only=True),
+    StrategyConfig(MovingAverageStrategy(),    ['vwap'],           weight=1.58, long_only=True),
+    StrategyConfig(BreakoutStrategy(),         ['low','high'],     weight=1.07, long_only=False),
+    StrategyConfig(BetaRegressionStrategy(),   ['low','high'],     weight=2.9,  long_only=True),
 ]
+
+# Normalize strategy weights to sum to 1
+w_sum_cfg = sum(cfg.weight for cfg in strategies_config)
+if w_sum_cfg > 0:
+    for cfg in strategies_config:
+        cfg.weight = float(cfg.weight) / float(w_sum_cfg)
 
 engine = MultiStrategyEngine(strategies_config, combine='weighted_sum')
 
@@ -1066,7 +1073,7 @@ pipeline = LiveDataPipeline(
         'password': COINBASE_PASSWORD
     },
     symbols=SYMBOLS,
-    timeframe='1m',
+    timeframe='5m',
     limit=500
 )
 
@@ -1155,12 +1162,49 @@ def fetch_last_prices(series_mats: dict) -> dict:
     return {col: float(last[col]) for col in close_m.columns}
 
 
+def process_trade_queue(queue, positions, quote_balance, limit=5, cooldown=60):
+    pending = list(queue)
+    while pending:
+        batch = pending[:limit]
+        pending = pending[limit:]
+        retry = []
+        for task in batch:
+            base = task["base"]
+            side = task["side"]
+            qty = task["qty"]
+            price = task["price"]
+            res = roostoo_place_market_order(base, side, qty, price)
+            if res:
+                value = qty * price
+                detail = res.get("OrderDetail") if isinstance(res, dict) else {}
+                fill_price = price
+                if isinstance(detail, dict):
+                    fill_price = float(detail.get("FillPrice") or fill_price)
+                append_trade(base, side, qty, fill_price)
+                if side == "SELL":
+                    quote_balance += value
+                    positions[base] = max(0.0, positions.get(base, 0.0) - qty)
+                else:
+                    quote_balance -= value
+                    positions[base] = positions.get(base, 0.0) + qty
+            else:
+                retry.append(task)
+            time.sleep(0.25)
+        pending = retry + pending
+        if pending:
+            print("Hit trade limit; pausing before next batch.")
+            time.sleep(cooldown)
+    return quote_balance
+
+
 ########################
 # 4. Main Loop         #
 ########################
 
-def run_realtime_loop(sleep_seconds=60): ##CHANGE THIS TO CHANGE REBALANCE FREQUENCY ##
+def run_realtime_loop(sleep_seconds=86400): ##CHANGE THIS TO CHANGE REBALANCE FREQUENCY ##
     global _prev_target_weights
+    sell_queue = []
+    buy_queue = []
 
     while True:
         try:
@@ -1226,11 +1270,9 @@ def run_realtime_loop(sleep_seconds=60): ##CHANGE THIS TO CHANGE REBALANCE FREQU
                 time.sleep(sleep_seconds)
                 continue
 
-            # 7) Place orders (LONG ONLY, SAFE)
-            #    - never short
-            #    - never sell more than you own
-            #    - never trade below MIN_NOTIONAL
-            #    - use local quote_balance to not overspend
+            # 7) Queue trades to honor API rate limits
+            sell_pool = 0.0
+            buy_pool = 0.0
             for base in bases:
                 px = float(prices.get(base, 0.0))
                 if not np.isfinite(px) or px <= 0:
@@ -1249,7 +1291,6 @@ def run_realtime_loop(sleep_seconds=60): ##CHANGE THIS TO CHANGE REBALANCE FREQU
 
                 if not np.isfinite(tgt_val) or not np.isfinite(cur_val):
                     continue
-
                 diff_val = tgt_val - cur_val
                 if not np.isfinite(diff_val):
                     continue
@@ -1258,14 +1299,21 @@ def run_realtime_loop(sleep_seconds=60): ##CHANGE THIS TO CHANGE REBALANCE FREQU
                 if abs(diff_val) < MIN_NOTIONAL:
                     continue
 
-                # allow buy or sell (no shorting)
                 if diff_val > 0:
-                    buy_val = min(diff_val, quote_balance)
+                    available_cash = quote_balance + sell_pool - buy_pool
+                    if available_cash <= 0:
+                        continue
+                    buy_val = min(diff_val, available_cash)
                     if buy_val < MIN_NOTIONAL:
                         continue
                     qty = buy_val / px
-                    side = "BUY"
-                    quote_balance -= buy_val
+                    buy_queue.append({
+                        "base": base,
+                        "side": "BUY",
+                        "qty": qty,
+                        "price": px
+                    })
+                    buy_pool += buy_val
                 else:
                     desired_sell_val = -diff_val
                     max_sell_val = cur_val            # don't sell more than we own
@@ -1273,17 +1321,21 @@ def run_realtime_loop(sleep_seconds=60): ##CHANGE THIS TO CHANGE REBALANCE FREQU
                     if sell_val < MIN_NOTIONAL:
                         continue
                     qty = sell_val / px
-                    side = "SELL"
+                    sell_queue.append({
+                        "base": base,
+                        "side": "SELL",
+                        "qty": qty,
+                        "price": px
+                    })
+                    sell_pool += sell_val
 
-                res = roostoo_place_market_order(base, side, qty, px)
-                if res:
-                    fill_price = px
-                    detail = res.get("OrderDetail", {})
-                    if isinstance(detail, dict):
-                        fill_price = float(detail.get("FillPrice") or fill_price)
-                    append_trade(base, side, qty, fill_price)
-                    time.sleep(0.25)
+            trade_queue = sell_queue + buy_queue
+            if not trade_queue:
+                print("No qualified trades after thresholds.")
+                time.sleep(sleep_seconds)
+                continue
 
+            quote_balance = process_trade_queue(trade_queue, positions, quote_balance)
             _prev_target_weights = tw
 
         except Exception as e:
@@ -1309,4 +1361,4 @@ if __name__ == "__main__":
         print("Starting Multi-Strategy live executor in DRY RUN mode...")
     else:
         print("Starting Multi-Strategy live executor in LIVE mode (REAL ORDERS will be sent via Roostoo)...")
-    run_realtime_loop(sleep_seconds=60) ##CHANGE THIS TO MODIFY REBALANCE
+    run_realtime_loop(sleep_seconds=86400)
