@@ -37,12 +37,12 @@ import hashlib
 import hmac
 import time
 
-API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"
-SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"
+# API_KEY = "UqIHb7BC5QgKVMjZKAhzARLUa6jWvvgO3GO1OxdVMqXBWVPJsqsha33VIvh6KFrx"
+# SECRET = "KBpaEeVmYVussNCI5ewdTv7jTmVJ6S0ZGWxvIkpKz5xMoLGsVwWYMKek0a5XeRAD"
 
 """REAL API"""
-# API_KEY = "pR6tM2yNaV9bC4DfH1jK7LxWoG3qS8EeT5uZ0iYcnB2vF6PrX7wD1mQaJ4lUh9Sz"
-# SECRET = "C9vB1nM5qW7eRtY3uI9oPaS1dF3gHjK7lL2ZxC6V8bN4mQwE0rT4yUiP6oA8"
+API_KEY = "pR6tM2yNaV9bC4DfH1jK7LxWoG3qS8EeT5uZ0iYcnB2vF6PrX7wD1mQaJ4lUh9Sz"
+SECRET = "C9vB1nM5qW7eRtY3uI9oPaS1dF3gHjK7lL2ZxC6V8bN4mQwE0rT4yUiP6oA8"
 
 BASE_URL = "https://mock-api.roostoo.com"
 
@@ -1090,7 +1090,7 @@ MIN_NOTIONAL = 10.0   # Minimum USD value per trade
 
 _prev_target_weights = None  # persistent between iterations
 
-def warm_strategies_with_history(days=1, timeframe='5m'):
+def warm_strategies_with_history(days=14, timeframe='5m'):
     global _prev_target_weights
     ex = pipeline.exchange
     syms = pipeline.symbols
@@ -1439,7 +1439,7 @@ if __name__ == "__main__":
         print("Starting Multi-Strategy live executor in LIVE mode (REAL ORDERS will be sent via Roostoo)...")
 
     # Warm strategies with 5m data before live loop
-    warm_strategies_with_history(days=1, timeframe='5m')
+    warm_strategies_with_history(days=14, timeframe='5m')
 
 
     run_realtime_loop(sleep_seconds=86400)
