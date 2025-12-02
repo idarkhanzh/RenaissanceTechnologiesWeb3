@@ -16,8 +16,8 @@ class WhaleSupplySignal:
     MODEL_PATH      = "models/whale_btc_model.pt"
     SCALER_PATH     = "models/whale_scaler.pkl"
 
-    BUY_TH  = 0.51
-    SELL_TH = 0.49
+    BUY_TH  = 0.6
+    SELL_TH = 0.4
 
     def __init__(self):
         logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -151,3 +151,4 @@ class WhaleSupplySignal:
 
 if __name__ == "__main__":
     WhaleSupplySignal().backtest()
+
